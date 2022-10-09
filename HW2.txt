@@ -1,0 +1,255 @@
+1. За неделю возникли проблемы с производительностью, но благодаря использование селекторов и буферов в системе nio. Были, конечно, ошибки: различного рода опечатки и подключение необходимых библиотек. 
+
+2. 
+import java.io.IOException;
+import java.io.RandomAccessFile;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.file.*;
+import java.nio.file.attribute.BasicFileAttributes;
+
+public class Main {
+
+    public static void main(String[] args) throws IOException {
+        Path path = Paths.get("C:\\Users\\file.txt");
+        Path path1 = Path.of("Users\\file.txt");
+        Path path2 = Path.of("./tmp/file");
+
+        try {
+            Files.createDirectories(Path.of("dir"));
+        } catch (FileAlreadyExistsException e) {
+
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+
+        Files.copy(path, path1, StandardCopyOption.REPLACE_EXISTING);
+
+        Files.walkFileTree(Path.of("dir"), new FileVisitor<Path>() {
+            @Override
+            public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException {
+                if (dir.endsWith("d")) {
+                    return FileVisitResult.CONTINUE;
+                } else {
+                    return FileVisitResult.TERMINATE;
+                }
+            }
+
+            @Override
+            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+                Files.delete(file);
+                return FileVisitResult.TERMINATE;
+            }
+
+            @Override
+            public FileVisitResult visitFileFailed(Path file, IOException exc) throws IOException {
+                return null;
+            }
+
+            @Override
+            public FileVisitResult postVisitDirectory(Path dir, IOException exc) throws IOException {
+                return null;
+            }
+        });
+
+        ByteBuffer buffer = ByteBuffer.allocate(1024 * 1024 * 10);
+        FileChannel fileChannel = FileChannel.open(Path.of("file.txt"));
+        fileChannel.read(buffer);
+
+        byte[] bytes = Files.readAllBytes(Path.of("file.txt"));
+
+    }
+}
+ 
+    
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.nio.channels.SelectionKey;
+import java.nio.channels.Selector;
+import java.nio.channels.ServerSocketChannel;
+import java.nio.channels.SocketChannel;
+import java.util.Iterator;
+import java.util.Set;
+
+public class Server implements Runnable {
+
+    public static void main(String[] args) {
+        new Thread(new Server(8150)).start();
+    }
+
+    private final int port;
+    private Selector selector;
+    private ServerSocketChannel serverSocketChannel;
+
+    public Server(int port) {
+        this.port = port;
+
+        try {
+            selector = Selector.open();
+            serverSocketChannel = ServerSocketChannel.open();
+            serverSocketChannel.bind(new InetSocketAddress(port));
+            serverSocketChannel.configureBlocking(false);
+            serverSocketChannel.register(selector, SelectionKey.OP_ACCEPT);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Override
+    public void run() {
+        System.out.println("Server started on port " + port);
+        while (true) {
+            try {
+                selector.select();
+                Set<SelectionKey> selectionKeys = selector.selectedKeys();
+                Iterator<SelectionKey> iterator = selectionKeys.iterator();
+
+                while (iterator.hasNext()) {
+                    SelectionKey key = iterator.next();
+                    iterator.remove();
+
+                    if (!key.isValid()) {
+                        break;
+                    }
+                    if (key.isValid() && key.isAcceptable()) {
+                        acceptClient();
+                    }
+                    if (key.isValid() && key.isReadable()) {
+                        if (key.attachment() == null) {
+                            key.attach(new ChannelReader((SocketChannel) key.channel()));
+                        }
+                        ((ChannelReader) key.attachment()).read();
+                    }
+                    
+                }
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        }
+    }
+
+    private void acceptClient() {
+        try {
+            SocketChannel socketChannel = serverSocketChannel.accept();
+            socketChannel.configureBlocking(false);
+            socketChannel.register(selector, SelectionKey.OP_READ | SelectionKey.OP_WRITE);
+            System.out.println("Accepted new client");
+        } catch (IOException e) {
+            System.out.println("Accept failed!");
+        }
+    }
+}
+
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.SocketChannel;
+import java.nio.charset.StandardCharsets;
+
+public class ChannelReader {
+
+    private final SocketChannel channel;
+    private final ByteBuffer buffer;
+    private boolean headerRead = true;
+    private byte[] data;
+    private int index;
+
+
+    public ChannelReader(SocketChannel channel) {
+        this.channel = channel;
+        buffer = ByteBuffer.allocate(1024);
+    }
+
+    public void read() {
+        try {
+            channel.read(buffer);
+            if (headerRead) {
+                if (buffer.position() < 4) {
+                    return;
+                }
+                buffer.flip();
+                int size = buffer.getInt();
+                data = new byte[size];
+                headerRead = false;
+            }
+            while (buffer.hasRemaining()) {
+                data[index++] = buffer.get();
+            }
+            buffer.clear();
+            if (index == data.length) {
+                System.out.println("Received from client: " + new String(data, StandardCharsets.UTF_8));
+                String response = "OK";
+                byte[] data = response.getBytes(StandardCharsets.UTF_8);
+                buffer.putInt(data.length);
+                buffer.put(data); // todo: Не работало, потому что забыл данные в буфер положить
+                buffer.flip();
+                channel.write(buffer);
+                System.out.println("Response sent");
+                channel.close();
+            }
+
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+}
+
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.nio.ByteBuffer;
+import java.nio.channels.SocketChannel;
+import java.nio.charset.StandardCharsets;
+import java.util.function.Consumer;
+
+public class Client {
+
+    public static void main(String[] args) {
+        String msg = "Hello, сервер!";
+        new Client("localhost", 8150).send(msg, System.out::println);
+    }
+
+    private final String host;
+    private final int port;
+
+    public Client(String host, int port) {
+        this.host = host;
+        this.port = port;
+    }
+
+    public void send(String msg, Consumer<String> callback) {
+        new Thread(() -> {
+            try (SocketChannel socketChannel = SocketChannel.open(new InetSocketAddress(host, port))) {
+                ByteBuffer buffer = ByteBuffer.allocate(1024);
+
+                buffer.putInt(msg.getBytes(StandardCharsets.UTF_8).length);
+                buffer.put(msg.getBytes(StandardCharsets.UTF_8));
+                buffer.flip();
+                while (buffer.hasRemaining()) {
+                    socketChannel.write(buffer);
+                }
+                buffer.clear();
+                byte[] data;
+                while (buffer.position() < 4) {
+                    if (socketChannel.read(buffer) == -1) {
+                        callback.accept("Interrupted");
+                        return;
+                    }
+                }
+                buffer.flip();
+                data = new byte[buffer.getInt()];
+                buffer.compact();
+                while (buffer.position() < data.length) {
+                    if (socketChannel.read(buffer) == -1) {
+                        callback.accept("Interrupted");
+                        return;
+                    }
+                }
+                buffer.flip();
+                buffer.get(data);
+                callback.accept("Server answered: " + new String(data, StandardCharsets.UTF_8));
+                System.out.println("Connection closed");
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        }).start();
+    }
+}
